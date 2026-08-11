@@ -1,137 +1,98 @@
+#!/usr/bin/env python3
+"""
+Cosmos3-Edge Generator - Text-to-Video（文生视频）
+
+背景：diffusers 的 Cosmos3OmniPipeline 仅支持 Qwen3VL 架构（Nano/Super），
+不支持 Nemotron-2B-Dense-VL 架构的 Cosmos3-Edge。因此 Edge 改走官方推荐的
+Cosmos Framework 推理路径：
+    python -m cosmos_framework.scripts.inference --checkpoint-path Cosmos3-Edge
+
+Edge 约束：无音频、仅 256p/480p、12-30fps、50-150 帧。
+官方推荐：resolution=480, num_frames=121, fps=24。
+
+本脚本只负责生成输入 JSON + 打印远程命令，不直接调模型/GUI。
+请同步到远程后按实际路径修改下方常量再运行。
+"""
+
+import json
 import os
+from pathlib import Path
 
-os.environ["HF_HOME"] = "/mnt/disk8/fengyun/huggingface"
-os.environ["HF_TOKEN"] = "hf_im"
+# ============ 可配置项（远程服务器） ============
+INPUT_DIR = Path("/home/shenyanyuan/fengyun/cosmos/edge_t2v_inputs")
+FRAMEWORK_DIR = "/home/shenyanyuan/fengyun/cosmos/packages/cosmos3"
+OUTPUT_ROOT = "/home/shenyanyuan/fengyun/cosmos/edge_t2v_outputs"
+HF_HOME = "/mnt/disk8/fengyun/huggingface"
+# 从环境变量读取，避免硬编码泄露；需要登录时在执行前 export HF_TOKEN=...
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
-import random
-import torch
-from diffusers import Cosmos3OmniPipeline
-from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
-from diffusers.utils import export_to_video
-
-
-# =========================
-# 显存监控函数
-# =========================
-def print_gpu_memory(tag=""):
-    if torch.cuda.is_available():
-
-        torch.cuda.synchronize()
-
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        max_allocated = torch.cuda.max_memory_allocated() / 1024**3
-
-        print(
-            f"\n[{tag}] GPU Memory:"
-            f"\n  Allocated: {allocated:.2f} GB"
-            f"\n  Reserved : {reserved:.2f} GB"
-            f"\n  Peak     : {max_allocated:.2f} GB\n"
-        )
-
-
-# 清空缓存，记录峰值
-torch.cuda.empty_cache()
-torch.cuda.reset_peak_memory_stats()
-
-
-model_id = "nvidia/Cosmos3-Nano"
-
-
-print_gpu_memory("Before loading model")
-
-
-pipe = Cosmos3OmniPipeline.from_pretrained(
-    model_id,
-    torch_dtype=torch.bfloat16,
-    safety_checker=None,
-    enable_safety_checker=False,
-    token=os.environ["HF_TOKEN"],
-)
-
-
-print_gpu_memory("After loading model (CPU)")
-
-
-pipe.scheduler = UniPCMultistepScheduler.from_config(
-    pipe.scheduler.config,
-    flow_shift=10.0
-)
-
-
-pipe.enable_model_cpu_offload()
-
-
-print_gpu_memory("After moving model to CUDA")
-
-
-prompts = [
+PROMPTS = [
     "A mobile robot navigates a warehouse aisle and stops at a shelf.",
     "A humanoid robot walking on a sunny street, people watching in the background.",
     "A drone flying over a construction site, capturing aerial footage.",
 ]
 
-
-for i, prompt in enumerate(prompts):
-
-    print(f"\n[{i+1}/{len(prompts)}] 生成: {prompt[:50]}...")
-
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-
-
-    print_gpu_memory("Before inference")
+# Edge 生成参数
+NUM_FRAMES = 121
+FPS = 24
+RESOLUTION = "480"
+ASPECT_RATIO = "16,9"
+NUM_STEPS = 35
+GUIDANCE = 6.0
+SHIFT = 10.0
 
 
-    seed = random.randint(0, 2**31)
+def build_sample(name: str, prompt: str) -> dict:
+    return {
+        "model_mode": "text2video",
+        "name": name,
+        "prompt": prompt,
+        "num_frames": NUM_FRAMES,
+        "fps": FPS,
+        "resolution": RESOLUTION,
+        "aspect_ratio": ASPECT_RATIO,
+        "num_steps": NUM_STEPS,
+        "guidance": GUIDANCE,
+        "shift": SHIFT,
+        "enable_sound": False,
+    }
 
 
-    with torch.no_grad():
+def main():
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    input_files = []
+    for i, prompt in enumerate(PROMPTS):
+        name = f"t2v_edge_{i + 1}"
+        path = INPUT_DIR / f"{name}.json"
+        path.write_text(json.dumps(build_sample(name, prompt), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        input_files.append(path)
+        print(f"[ok] 已生成输入文件: {path}")
 
-        result = pipe(
-            prompt=prompt,
-            negative_prompt="blurry, distorted, low quality",
+    files_arg = " ".join(str(p) for p in input_files)
+    env_block = f"export HF_HOME={HF_HOME}"
+    if HF_TOKEN:
+        env_block += f"\nexport HF_TOKEN={HF_TOKEN}"
 
-            num_frames=25,
-            height=320,
-            width=512,
-            fps=10,
-
-            num_inference_steps=20,
-            guidance_scale=6.0,
-
-            enable_sound=False,
-            add_resolution_template=False,
-            add_duration_template=False,
-
-            generator=torch.Generator(
-                device="cpu"
-            ).manual_seed(seed),
-        )
-
-
-    print_gpu_memory("After inference")
-
-
-    output_path = f"/home/shenyanyuan/fengyun/cosmos/t2v_output_{i+1}.mp4"
-
-    export_to_video(
-        result.video,
-        output_path,
-        fps=10,
-        macro_block_size=1
-    )
-
-
-    print(f"  已保存: {output_path}")
+    cmd = f"""{env_block}
+cd {FRAMEWORK_DIR}
+source .venv/bin/activate
+python -m cosmos_framework.scripts.inference \\
+    --parallelism-preset=latency \\
+    -i {files_arg} \\
+    -o {OUTPUT_ROOT} \\
+    --checkpoint-path Cosmos3-Edge \\
+    --no-guardrails \\
+    --seed=0
+"""
+    print("\n" + "=" * 72)
+    print("在远程服务器执行以下命令(Cosmos Framework 加载 Cosmos3-Edge):")
+    print("=" * 72)
+    print(cmd)
+    print("=" * 72)
+    print(f"  * 输出: {OUTPUT_ROOT}/t2v_edge_<N>/vision.mp4  (N=1,2,3)")
+    print("  * 首次运行自动下载 nvidia/Cosmos3-Edge 权重到 HF_HOME")
+    print("  * 如需安全检测（需装 guardrail 依赖+apt 系统包），去掉 --no-guardrails")
 
 
-    # 释放当前视频结果
-    del result
-    torch.cuda.empty_cache()
-
-
-    print_gpu_memory("After cleanup")
-
-
-print("\n全部完成！")
+if __name__ == "__main__":
+    main()
