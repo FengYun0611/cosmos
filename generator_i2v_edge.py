@@ -37,9 +37,9 @@ RESOLUTION = "480"            # "480" → 832x480（Edge 推荐）；"256" → 1
 RES_MAP = {"480": (832, 480), "256": (320, 192)}
 WIDTH, HEIGHT = RES_MAP[RESOLUTION]
 FLOW_SHIFT = 3.0              # Edge 480p 的推荐 shift
-NUM_FRAMES = 25               # 与 generator_i2v 一致（Edge 推荐 121）
-FPS = 10                      # 与 generator_i2v 一致（Edge 推荐 24）
-NUM_STEPS = 20                # 与 generator_i2v 一致（Edge 推荐 50）
+NUM_FRAMES = 121               # 与 generator_i2v 一致（Edge 推荐 121）
+FPS = 24                      # 与 generator_i2v 一致（Edge 推荐 24）
+NUM_STEPS = 50                # 与 generator_i2v 一致（Edge 推荐 50）
 GUIDANCE = 6.0
 SEED = 1234
 OFFLINE = True                # 权重已缓存时 True（不联网）；需下载时改 False 并 export HF_ENDPOINT=https://hf-mirror.com
